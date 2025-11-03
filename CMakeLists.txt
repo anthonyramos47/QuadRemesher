@@ -48,6 +48,9 @@ FetchContent_MakeAvailable(directional)
 set(DIRECTIONAL_INCLUDE ${directional_SOURCE_DIR}/include)
 set(SADDLEPOINT_INCLUDE ${directional_SOURCE_DIR}/external/SaddlePoint/include)
 
+# CGAL
+find_package(CGAL REQUIRED COMPONENTS Core)
+
 # Executable
 add_executable(${PROJECT_NAME} src/main.cpp)
 
@@ -58,7 +61,14 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 # Link libraries
-target_link_libraries(${PROJECT_NAME} PRIVATE igl::core igl::opengl igl::glfw igl::imgui)
+target_link_libraries(${PROJECT_NAME} PRIVATE
+    igl::core
+    igl::opengl
+    igl::glfw
+    igl::imgui
+    CGAL::CGAL
+    CGAL::CGAL_Core
+)
 
 if(USE_POLYSCOPE)
     target_link_libraries(${PROJECT_NAME} PRIVATE polyscope)

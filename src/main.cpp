@@ -5,6 +5,7 @@
 
 // Directional includes
 #include <igl/unproject_onto_mesh.h>
+#include <igl/principal_curvature.h>
 #include <directional/readOBJ.h>
 #include <directional/CartesianField.h>
 #include <directional/TriMesh.h>
@@ -22,6 +23,10 @@
 #include <directional/write_raw_field.h>
 #include <directional/cut_mesh_with_singularities.h>
 #include <directional/directional_viewer.h>
+#include "polygonal_write_OFF.h"
+#include <directional/mesh_function_isolines.h>
+#include <directional/branched_isolines.h>
+#include <directional/setup_mesh_function_isolines.h>
 
 
 int N = 4;
@@ -32,11 +37,40 @@ directional::CartesianField rawFaceField, powerFaceField, combedField;
 directional::CartesianField rawVertexField, powerVertexField;
 Eigen::MatrixXd cutUVFull, cutUVRot, cornerWholeUV;
 directional::DirectionalViewer viewer;
+Eigen::MatrixXd constFaces;
+Eigen::MatrixXd constVectors;
 
 typedef enum {FIELD, ROT_INTEGRATION, FULL_INTEGRATION} ViewingModes;
 ViewingModes viewingMode=FIELD;
 
-const std::string OUTPUT_PATH = "/home/anthony/KAUSTLocal/Qremesh/out";
+const std::string OUTPUT_PATH = "../out/";
+const std::string INPUT_PATH = "../data/";
+
+void saveObj(const std::string& filename,
+                    const Eigen::MatrixXd& V,
+                    const Eigen::MatrixXi& F,
+                    const Eigen::VectorXi& D)
+{   
+
+    // Open file
+    std::ofstream file(OUTPUT_PATH + filename);
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open file " << OUTPUT_PATH + filename << " for writing.\n";  
+        return;
+    }
+    // Write vertices
+    for (int i = 0; i < V.rows(); ++i) {
+        file << "v " << V(i, 0) << " " << V(i, 1) << " " << V(i, 2) << "\n";
+    }
+    // Write faces
+    for (int i = 0; i < F.rows(); ++i) {
+        file << "f";
+        for (int j=0;j< D(i);j++){
+            file << " " << (F(i, j) + 1); // OBJ format uses 1-based indexing
+        }
+        file << "\n";
+    }
+}
 
 
 Eigen::Matrix<unsigned char,Eigen::Dynamic,Eigen::Dynamic> texture_R, texture_G, texture_B;
@@ -184,7 +218,7 @@ int main(int argc, char* argv[]) {
         }
         else if (arg == "-i" || arg == "--input") {
             if (i + 1 < argc) {
-                inputFile = argv[++i];
+                inputFile = INPUT_PATH + argv[++i];
             } else {
                 std::cerr << "Error: " << arg << " requires a file path\n";
                 return 1;
@@ -239,64 +273,123 @@ int main(int argc, char* argv[]) {
     std::cout << "Vertices: " << V.rows() << "\n";
     std::cout << "Faces: " << F.rows() << "\n\n";
 
+    setup_line_texture();
+
     // Initialize Directional data structures
     std::cout << "Initializing Directional structures...\n";
 
     // Set mesh
     mesh.set_mesh(V, F);
 
-    directional::IntrinsicFaceTangentBundle ftb;
+    // Compute curvature directions via quadric fitting
+    Eigen::MatrixXd PD1,PD2;
+    Eigen::VectorXd PV1,PV2;
+    igl::principal_curvature(V,F,PD1,PD2,PV1,PV2);    
     ftb.init(mesh);
-    vtb.init(mesh);
 
     std::cout << "Directional TriMesh and TangentBundle initialized!\n";
     std::cout << "  - Faces: " << mesh.F.rows() << "\n";
     std::cout << "  - Tangent spaces: " << ftb.sources.rows() << "\n\n";
 
+    // Convert principal curvature directions to face-based cross field
+    std::cout << "Converting principal curvature directions to face field...\n";
+
+    // Initialize raw field with N=4 directions per face
+    Eigen::MatrixXd faceCurvatureField(mesh.F.rows(), 3 * N);
+
+    // For each face, average the principal directions from its vertices
+    for (int f = 0; f < mesh.F.rows(); f++) {
+        // Get the three vertex indices of the face
+        int v0 = mesh.F(f, 0);
+        int v1 = mesh.F(f, 1);
+        int v2 = mesh.F(f, 2);
+
+        // Average the first principal direction from the three vertices
+        Eigen::Vector3d avgPD1 = PD1.row(v0) + PD1.row(v1) + PD1.row(v2);
+        avgPD1.normalize();
+
+        // Average the second principal direction from the three vertices
+        Eigen::Vector3d avgPD2 = PD2.row(v0) + PD2.row(v1) + PD2.row(v2);
+        avgPD2.normalize();
+
+        // For a 4-RoSy field, store: PD1, PD2, -PD1, -PD2
+        faceCurvatureField.block<1,3>(f, 0) = avgPD1.transpose();
+        faceCurvatureField.block<1,3>(f, 3) = avgPD2.transpose();
+        faceCurvatureField.block<1,3>(f, 6) = -avgPD1.transpose();
+        faceCurvatureField.block<1,3>(f, 9) = -avgPD2.transpose();
+    }
+
+    // Initialize rawFaceField from the curvature directions
+    rawFaceField.init(ftb, directional::fieldTypeEnum::RAW_FIELD, N);
+    rawFaceField.set_extrinsic_field(faceCurvatureField);
+
+    std::cout << "Principal curvature field created with " << rawFaceField.extField.rows()
+              << " faces and " << N << " directions per face\n\n";
+
     std::cout << "Launching Directional viewer...\n\n";
 
-    Eigen::VectorXi constFaces, constVertices;
-    Eigen::MatrixXd constVectors;
-    constFaces.resize(1);
-    constFaces<<0;
-    constVectors.resize(1,3);
-    constVectors<<mesh.V.row(mesh.F(0,2))-mesh.V.row(mesh.F(0,1));
-    constVertices.resize(1);
-    constVertices<<mesh.F(0,1);
+    
 
-    directional::power_field(vtb, constVertices, constVectors, Eigen::VectorXd::Constant(constVertices.size(),-1.0), N, powerVertexField);
-    directional::power_field(ftb, constFaces, constVectors, Eigen::VectorXd::Constant(constFaces.size(),-1.0), N, powerFaceField);
-
-    // computing power fields
-    directional::power_to_raw(powerFaceField, N, rawFaceField,true);
-    directional::power_to_raw(powerVertexField, N, rawVertexField,true);
     
     directional::principal_matching(rawFaceField);
-    directional::principal_matching(rawVertexField);
+    // directional::principal_matching(rawVertexField);
 
     // Combing and cutting
-    Eigen::VectorXd curlNorm;
-    directional::curl_matching(rawFaceField, curlNorm);
-    std::cout << "Curl norm max: " << curlNorm.maxCoeff() << std::endl;
-
-    directional::IntegrationData intData(N);
-    directional::setup_integration(rawFaceField, intData, meshCut, combedField);
-
-    intData.verbose=true;
-    intData.integralSeamless=false;
+    // Eigen::VectorXd curlNorm;
+    // directional::curl_matching(rawFaceField, curlNorm);
+    // std::cout << "Curl norm max: " << curlNorm.maxCoeff() << std::endl;
     
-    std::cout<<"Solving for permutationally-seamless integration"<<std::endl;
-    directional::integrate(combedField, intData, meshCut, cutUVRot ,cornerWholeUV);
-    //Extracting the UV from [U,V,-U, -V];
-    cutUVRot=cutUVRot.block(0,0,cutUVRot.rows(),2);
-    std::cout<<"Done!"<<std::endl;
 
-    intData.verbose=true;
-    intData.integralSeamless=true;
-    std::cout<<"Solving for integrally-seamless integration"<<std::endl;
-    directional::integrate(combedField,  intData, meshCut, cutUVFull,cornerWholeUV);
-    cutUVFull=cutUVFull.block(0,0,cutUVFull.rows(),2);
-    std::cout<<"Done!"<<std::endl;
+    // // Setup integration data
+    // directional::IntegrationData intData(N);
+    // directional::setup_integration(rawFaceField, intData, meshCut, combedField);
+
+    // intData.verbose=true;
+    // intData.integralSeamless=true;
+    // // intData.roundSeams=true;
+        
+    // std::cout<<"Solving for permutationally-seamless integration"<<std::endl;
+    // directional::integrate(combedField, intData, meshCut, cutUVRot ,cornerWholeUV);
+    // //Extracting the UV from [U,V,-U, -V];
+    // cutUVRot=cutUVRot.block(0,0,cutUVRot.rows(),2);
+    // // std::cout<<"Done!"<<std::endl;
+
+
+    // //setting up mesh data from itnegration data
+    // directional::MeshFunctionIsolinesData mfiData;
+    // directional::setup_mesh_function_isolines(meshCut, intData, mfiData);
+
+    // Eigen::MatrixXd VRemeshed;
+    // Eigen::MatrixXi FRemeshed;
+    // Eigen::VectorXi DRemeshed;
+    // // Meshing and saving
+    // directional::mesh_function_isolines(mesh, mfiData, true, VRemeshed, DRemeshed, FRemeshed);
+
+    
+    // saveObj("Remeshed.obj", VRemeshed, FRemeshed, DRemeshed);
+    // std::cout<<"Remeshed mesh saved to "<<OUTPUT_PATH+"/remeshed.obj"<<std::endl;
+
+    // for (int i=0;i<FRemeshed.rows();i++){
+    //   for (int j=0;j<DRemeshed(i);j++){
+    //     std::cout << FRemeshed(i,j) << " ";
+    //   }
+    //     std::cout << std::endl;
+    // }
+
+    // for (int i=0;i<VRemeshed.rows();i++){
+        
+    //     std::cout << VRemeshed.row(i) << std::endl;
+    // }   
+
+    // hedra::polygonal_write_OFF(OUTPUT_PATH + "/Remeshed.off", VRemeshed, DRemeshed, FRemeshed);
+    // std::cout<<"Remeshed mesh saved to "<<OUTPUT_PATH+"/remeshed.obj"<<std::endl;
+
+    // intData.verbose=true;
+    // intData.integralSeamless=true;
+    // std::cout<<"Solving for integrally-seamless integration"<<std::endl;
+    // directional::integrate(combedField,  intData, meshCut, cutUVFull,cornerWholeUV);
+    // cutUVFull=cutUVFull.block(0,0,cutUVFull.rows(),2);
+    // std::cout<<"Done!"<<std::endl;
 
     viewer.set_mesh(mesh, 0);
     viewer.set_mesh(meshCut, 1);
