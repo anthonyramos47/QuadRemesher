@@ -14,9 +14,10 @@
 #include <directional/read_raw_field.h>
 #include <directional/power_field.h>
 #include <directional/power_to_raw.h>
-#include <directional/directional_viewer.h>
-#include <directional/setup_integration.h>
-#include <directional/integrate.h>
+#include <directional/polyvector_to_raw.h>
+#include <directional/polyvector_field.h>
+
+
 #include <directional/combing.h>
 #include <directional/curl_matching.h>
 #include <directional/writeOBJ.h>
@@ -27,20 +28,20 @@
 #include <directional/mesh_function_isolines.h>
 #include <directional/branched_isolines.h>
 #include <directional/setup_mesh_function_isolines.h>
+#include <directional/setup_integration.h>
+#include <directional/integrate.h>
 
 
 int N = 4;
 directional::TriMesh mesh, meshCut;
 directional::IntrinsicVertexTangentBundle vtb;
 directional::IntrinsicFaceTangentBundle ftb;
-directional::CartesianField rawFaceField, powerFaceField, combedField;
-directional::CartesianField rawVertexField, powerVertexField;
-Eigen::MatrixXd cutUVFull, cutUVRot, cornerWholeUV;
+directional::CartesianField rawFaceField, prosFaceField, powerFaceField, combedField;
+Eigen::MatrixXd cutUVFull, cornerWholeUV;
 directional::DirectionalViewer viewer;
-Eigen::MatrixXd constFaces;
-Eigen::MatrixXd constVectors;
 
-typedef enum {FIELD, ROT_INTEGRATION, FULL_INTEGRATION} ViewingModes;
+
+typedef enum {FIELD, FIELD_2, FULL_INTEGRATION} ViewingModes;
 ViewingModes viewingMode=FIELD;
 
 const std::string OUTPUT_PATH = "../out/";
@@ -96,15 +97,48 @@ void update_viewer()
 {
   if (viewingMode==FIELD){
     viewer.set_active(true,0);
-    viewer.set_active(false,1);
-    viewer.toggle_texture(false,1);
-  } else if ((viewingMode==ROT_INTEGRATION) || (viewingMode==FULL_INTEGRATION)){
-    viewer.set_uv(viewingMode==ROT_INTEGRATION ? cutUVRot : cutUVFull,1);
-    viewer.set_active(true,1);
+    viewer.toggle_field(true,0);
+
+    viewer.set_active(false, 1);
+    viewer.toggle_field(false,1);
+    
+  } 
+  else if (viewingMode==FIELD_2){
     viewer.set_active(false,0);
-    viewer.toggle_texture(true,1);
+    viewer.toggle_field(false,0);
+    viewer.set_active(true, 1);
+    viewer.toggle_field(true,1);
+    
+    
+
+    
+    //viewer.toggle_field(true,1);
   }
+//   else if (viewingMode==FULL_INTEGRATION){
+//     viewer.set_uv(cutUVFull,1);
+//     viewer.set_active(true,1);
+//     viewer.set_active(false,0);
+//     viewer.toggle_texture(true,1);
+//   } else if (viewingMode==PRINCIPAL_FIELD){
+//     viewer.set_active(true,2);
+//     viewer.set_active(false,0);
+//     viewer.set_active(false,1);
+//     viewer.toggle_texture(false,1); 
+//   }
 }
+
+// void integrate_field()
+// {
+//     directional::IntegrationData intData;
+//     intData.verbose=true;
+//     intData.integralSeamless=true;
+//     std::cout<<"Solving for integrally-seamless integration"<<std::endl;
+//     directional::integrate(combedField,  intData, meshCut, cutUVFull,cornerWholeUV);
+//     cutUVFull=cutUVFull.block(0,0,cutUVFull.rows(),2);
+//     std::cout<<"Done!"<<std::endl;
+
+// }
+
 
 // Handle keyboard input
 bool key_down(igl::opengl::glfw::Viewer& viewer, int key, int modifiers)
@@ -113,11 +147,14 @@ bool key_down(igl::opengl::glfw::Viewer& viewer, int key, int modifiers)
   {
       // Select vector
     case '1': viewingMode = FIELD; break;
-    case '2': viewingMode = ROT_INTEGRATION; break;
-    case '3': viewingMode = FULL_INTEGRATION; break;
+    case '2': viewingMode = FIELD_2; break;
+    // case 'p': viewingMode = PRINCIPAL_FIELD; break;
+    // case '3': 
+    //     integrate_field(); 
+    //     break;
     case 'W':
       Eigen::MatrixXd emptyMat;
-      directional::writeOBJ(OUTPUT_PATH+"/mesh-rot-seamless.obj", meshCut, cutUVRot, meshCut.F);
+      
       directional::writeOBJ(OUTPUT_PATH+"/mesh-full-seamless.obj", meshCut, cutUVFull, meshCut.F);
       break;
   }
@@ -294,8 +331,9 @@ int main(int argc, char* argv[]) {
     // Convert principal curvature directions to face-based cross field
     std::cout << "Converting principal curvature directions to face field...\n";
 
-    // Initialize raw field with N=4 directions per face
-    Eigen::MatrixXd faceCurvatureField(mesh.F.rows(), 3 * N);
+
+    // // Initialize raw field with N=4 directions per face
+    Eigen::MatrixXd faceCurvatureField(mesh.F.rows(), 3*N);
 
     // For each face, average the principal directions from its vertices
     for (int f = 0; f < mesh.F.rows(); f++) {
@@ -313,25 +351,79 @@ int main(int argc, char* argv[]) {
         avgPD2.normalize();
 
         // For a 4-RoSy field, store: PD1, PD2, -PD1, -PD2
-        faceCurvatureField.block<1,3>(f, 0) = avgPD1.transpose();
-        faceCurvatureField.block<1,3>(f, 3) = avgPD2.transpose();
+        faceCurvatureField.block<1,3>(f, 0) =  avgPD1.transpose();
+        faceCurvatureField.block<1,3>(f, 3) =  avgPD2.transpose();
         faceCurvatureField.block<1,3>(f, 6) = -avgPD1.transpose();
         faceCurvatureField.block<1,3>(f, 9) = -avgPD2.transpose();
     }
 
-    // Initialize rawFaceField from the curvature directions
-    rawFaceField.init(ftb, directional::fieldTypeEnum::RAW_FIELD, N);
-    rawFaceField.set_extrinsic_field(faceCurvatureField);
+    // Convert principal curvature directions to face-based cross field
+    std::cout << "Setting curvature directions as powerfield\n" << std::endl;
 
-    std::cout << "Principal curvature field created with " << rawFaceField.extField.rows()
-              << " faces and " << N << " directions per face\n\n";
+    // Set up constraints for power field generation
+    Eigen::VectorXi constFaces;
+    Eigen::MatrixXd constVectors;
+    constFaces.resize(mesh.F.rows());
+    constFaces<<Eigen::VectorXi::LinSpaced(mesh.F.rows(),0,mesh.F.rows()-1);
+    // Constrained vectors per face
+    constVectors.resize(mesh.F.rows(),3*2); // 2 directions per face
+    constVectors<<faceCurvatureField.block(0,0,mesh.F.rows(),3), faceCurvatureField.block(0,3,mesh.F.rows(),3);
+    //constVectors<<faceCurvatureField.block(0,0,mesh.F.rows(),3); // Use first principal direction for power field
+    // Create power field 
+    directional::power_field(ftb, constFaces, constVectors, Eigen::VectorXd::Constant(constFaces.size(),-1.0), N, powerFaceField);    
+    // Convert to raw field
+    directional::power_to_raw(powerFaceField, N, prosFaceField, true);
+    // Compute principal matching
+    directional::principal_matching(prosFaceField);
 
-    std::cout << "Launching Directional viewer...\n\n";
 
+    Eigen::MatrixXd testFaceField(mesh.F.rows(), 3*2);
+    // per each face, set two arbitrary non-orthogonal directions
+    for (int f = 0; f < mesh.F.rows(); f++) {
+        // Get the three vertex indices of the face
+        int v0 = mesh.F(f, 0);
+        int v1 = mesh.F(f, 1);
+        int v2 = mesh.F(f, 2);
+
+
+
+        Eigen::Vector3d diru = mesh.V.row(v1) - mesh.V.row(v0) ;
+        diru.normalize();
+        Eigen::Vector3d dirv = mesh.V.row(v2) - mesh.V.row(v0)  ;
+        dirv.normalize();   
+
+        double theta = M_PI/6; // 30 degrees
     
 
-    
+        Eigen::Vector3d dir1 =   cos(theta) * diru + sin(theta) * dirv; 
+        Eigen::Vector3d dir2 =   cos(theta) * diru - sin(theta) * dirv; 
+        testFaceField.block<1,3>(f, 0) = dir1.transpose();
+        testFaceField.block<1,3>(f, 3) = dir2.transpose();
+    }
+
+
+    std::cout << "Use non-orthogonal field\n" << std::endl;
+
+    // Reset faces 
+    directional::polyvector_field(ftb, constFaces, testFaceField, N, powerFaceField);
+    // Convert to raw field
+    directional::polyvector_to_raw(powerFaceField, rawFaceField);
+    // Compute principal matching
     directional::principal_matching(rawFaceField);
+
+    // // Initialize rawFaceField from the curvature directions
+    // rawFaceField.init(ftb, directional::fieldTypeEnum::RAW_FIELD, N);
+    // rawFaceField.set_extrinsic_field(faceCurvatureField);
+
+    // std::cout << "Principal curvature field created with " << rawFaceField.extField.rows()
+    //           << " faces and " << N << " directions per face\n\n";
+
+    // std::cout << "Launching Directional viewer...\n\n";
+
+    // // Principal matching
+    // principalFaceField.init(ftb, directional::fieldTypeEnum::RAW_FIELD, N);
+    // principalFaceField.set_extrinsic_field(faceCurvatureField); // Copy raw field
+    // directional::principal_matching(principalFaceField);
     // directional::principal_matching(rawVertexField);
 
     // Combing and cutting
@@ -341,15 +433,20 @@ int main(int argc, char* argv[]) {
     
 
     // // Setup integration data
-    // directional::IntegrationData intData(N);
-    // directional::setup_integration(rawFaceField, intData, meshCut, combedField);
+    directional::IntegrationData intData(N);
+    directional::setup_integration(rawFaceField, intData, meshCut, combedField);
 
-    // intData.verbose=true;
-    // intData.integralSeamless=true;
-    // // intData.roundSeams=true;
+    intData.verbose=true;
+    intData.integralSeamless=true;
+    intData.roundSeams=true;
         
-    // std::cout<<"Solving for permutationally-seamless integration"<<std::endl;
-    // directional::integrate(combedField, intData, meshCut, cutUVRot ,cornerWholeUV);
+    std::cout<<"Solving for permutationally-seamless integration"<<std::endl;
+    directional::integrate(combedField,  intData, meshCut, cutUVFull,cornerWholeUV);
+    cutUVFull=cutUVFull.block(0,0,cutUVFull.rows(),2);
+    std::cout<<"Done!"<<std::endl;
+
+
+
     // //Extracting the UV from [U,V,-U, -V];
     // cutUVRot=cutUVRot.block(0,0,cutUVRot.rows(),2);
     // // std::cout<<"Done!"<<std::endl;
@@ -387,28 +484,38 @@ int main(int argc, char* argv[]) {
     // intData.verbose=true;
     // intData.integralSeamless=true;
     // std::cout<<"Solving for integrally-seamless integration"<<std::endl;
-    // directional::integrate(combedField,  intData, meshCut, cutUVFull,cornerWholeUV);
-    // cutUVFull=cutUVFull.block(0,0,cutUVFull.rows(),2);
-    // std::cout<<"Done!"<<std::endl;
+    
 
+    // Set meshes
     viewer.set_mesh(mesh, 0);
     viewer.set_mesh(meshCut, 1);
+    // Set mesh cutted
+    // viewer.set_mesh(meshCut, 1);
 
-    viewer.set_field(combedField, directional::DirectionalViewer::indexed_glyph_colors(combedField.extField, false));
+    // Set fields
+    // Field 0
+    viewer.set_field(prosFaceField, directional::DirectionalViewer::indexed_glyph_colors(prosFaceField.extField, false), 0);
+    // Field 1
+    viewer.set_field(rawFaceField, directional::DirectionalViewer::indexed_glyph_colors(rawFaceField.extField, false), 1);
+
+
+    // // Field 2
+    viewer.set_field(combedField, directional::DirectionalViewer::indexed_glyph_colors(combedField.extField, false), 1);
     viewer.set_seams(combedField.matching);
     viewer.set_texture(texture_R,texture_G,texture_B,1);
 
-      
-    viewer.toggle_texture(false,0);
-    viewer.toggle_field(true,0);
+    // Initial viewer setup
+    //viewer.toggle_texture(false,0);
+    viewer.toggle_field(true, 0);
+    
     viewer.toggle_seams(true,0);
 
     viewer.toggle_texture(true,1);
-    viewer.toggle_field(false,1);
-    viewer.toggle_seams(false,1);
+    viewer.toggle_seams(true,1);
+    //viewer.toggle_field(false,1);
+    //viewer.toggle_seams(false,1);
 
   
-    // viewer.set_mesh(mesh, 1);
 
 
     // viewer.set_field(rawFaceField,Eigen::MatrixXd(),0, 1.5, 0, 0.3);
