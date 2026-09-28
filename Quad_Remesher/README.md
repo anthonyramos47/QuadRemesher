@@ -1,58 +1,28 @@
-# Quad Remesher (MIQ)
+# Quad_Remesher
 
-Anisotropic quad remeshing using Mixed Integer Quadrangulation (MIQ). This project is a modification of the [anisotropic remeshing tutorial (Tutorial 506)](https://libigl.github.io/tutorial/#frame-fields) from [libigl](https://github.com/libigl/libigl).
+The remeshing tools themselves. See the [repository README](../README.md) for
+build instructions, the full command line, and the viewer controls.
 
-Created with assistance from Claude (Anthropic).
+- `quadRemesher.cpp` — the pipeline: frame field interpolation
+  (`comiso::frame_field`), anisotropic deformation (`frame_field_deformer`),
+  cross field and combing, MIQ global parameterization, and quad extraction.
+  Also hosts the interactive libigl viewer.
+- `principalDirections.cpp` — computes per-vertex principal curvature
+  directions (`igl::principal_curvature`) and writes them as DMAT, to be used
+  as the D1/D2 input.
+- `CMakeLists.txt` — fetches libigl, CoMISo, OpenMesh and libQEx.
 
-## Overview
+This started as a modification of libigl's
+[anisotropic remeshing tutorial 506](https://libigl.github.io/tutorial/#frame-fields)
+and has since diverged: flexible field input (DMAT or plain text, on vertices or
+faces, whole-mesh or a subset), constraint thinning, libQEx extraction, a batch
+mode, and field/seam diagnostics.
 
-Given a triangle mesh and per-vertex direction fields (D1, D2), this tool:
-
-1. Interpolates per-vertex directions to per-face cross field constraints
-2. Computes a smooth frame field via CoMISo
-3. Deforms the mesh for anisotropy support
-4. Runs MIQ global parameterization
-5. Extracts a quad mesh from the integer-grid UV map
-
-## Dependencies
-
-- [libigl](https://github.com/libigl/libigl) v2.5.0 (fetched automatically via CMake)
-- [CoMISo](https://www.graphics.rwth-aachen.de/software/comiso/) (via libigl copyleft module)
-- Eigen, OpenGL, GLFW (brought in by libigl)
-
-## Build
+Quick check that the build works:
 
 ```bash
-mkdir build && cd build
-cmake ..
-make -j$(nproc)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
+./build/principalDirections ../test_meshes/metro.out.obj /tmp/m/
+./build/quadRemesher ../test_meshes/metro.out.obj /tmp/m/D1.dmat /tmp/m/D2.dmat \
+    --out /tmp/m --name metro qex batch constraints=0.1
 ```
-
-On Apple Silicon, use the provided shell scripts:
-
-```bash
-./setup_arm.sh
-./build_arm.sh
-```
-
-## Usage
-
-```bash
-./quadRemesher <mesh.obj> <D1.dmat> <D2.dmat> [output_folder] [name] [method]
-```
-
-- `method`: `direct` (default, skips integer solver) or `integration` (uses integer solver)
-
-### Viewer Controls
-
-| Key | Action |
-|-----|--------|
-| `+` / `-` | Increase / decrease gradient size (coarser / finer quads) |
-| `S` | Extract and save quad mesh |
-| `R` | Preview extracted quad mesh |
-| `1` | Display original mesh |
-| `2` | Display deformed mesh |
-| `3` | Show constrained faces |
-| `4` | Show cross field on deformed mesh |
-| `5` | Show original input D1/D2 directions |
-| `7` | Show singularities and seams |
