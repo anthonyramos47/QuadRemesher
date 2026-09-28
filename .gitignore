@@ -16,3 +16,11 @@ output/
 
 # Local agent notes, not published
 CLAUDE.md
+
+# Local experiments and generated figures, not published
+sconjugate/
+Quad_Remesher/results/
+
+# Stale macOS/ARM helper scripts (reference files that no longer exist)
+Quad_Remesher/*_arm.sh
+Quad_Remesher/run_quad_remeshing.sh
