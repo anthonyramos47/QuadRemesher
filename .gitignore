@@ -1,0 +1,18 @@
+# Build artifacts (CMake FetchContent pulls ~340MB of dependency sources here)
+build/
+bin/
+*.o
+*.a
+
+# Editor / tool state
+.vscode/
+.polyscope.ini
+imgui.ini
+.DS_Store
+
+# Generated output
+output/
+*_Remeshed.obj
+
+# Local agent notes, not published
+CLAUDE.md
