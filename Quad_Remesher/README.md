@@ -7,9 +7,10 @@ build instructions, the full command line, and the viewer controls.
   (`comiso::frame_field`), anisotropic deformation (`frame_field_deformer`),
   cross field and combing, MIQ global parameterization, and quad extraction.
   Also hosts the interactive libigl viewer.
-- `principalDirections.cpp` — computes per-vertex principal curvature
-  directions (`igl::principal_curvature`) and writes them as DMAT, to be used
-  as the D1/D2 input.
+- `principalDirections.cpp` — an optional helper that generates a frame field
+  from principal curvature (`igl::principal_curvature`) and writes it as DMAT,
+  for when you have no field of your own. The remesher accepts any frame field;
+  nothing in the pipeline assumes curvature.
 - `CMakeLists.txt` — fetches libigl, CoMISo, OpenMesh and libQEx.
 
 This started as a modification of libigl's

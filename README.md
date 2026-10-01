@@ -1,13 +1,21 @@
 # QuadRemesher
 
-Curvature-aligned quad remeshing built on [libigl](https://libigl.github.io/)'s
+Frame-field aligned quad remeshing built on [libigl](https://libigl.github.io/)'s
 Mixed-Integer Quadrangulation (MIQ), with robust quad extraction via
 [libQEx](https://github.com/hcebke/libQEx).
 
-Given a triangle mesh and a pair of per-vertex or per-face direction fields, it
-interpolates a frame field, deforms the mesh for anisotropy, computes a seamless
-global parameterization with MIQ, and extracts a quad mesh from the integer-grid
-isolines.
+Given a triangle mesh and a pair of direction fields defining the desired quad
+orientation, it interpolates a frame field over the surface, computes a seamless
+global parameterization with MIQ, and extracts a quad mesh whose edges follow
+the prescribed directions.
+
+The frame field is the input and can come from anywhere — a conjugate or
+principal-stress field, a designed or hand-authored field, a field exported from
+another tool, or curvature. It may be given on vertices or on faces, for the
+whole mesh or for a subset of elements, and the solver interpolates it across
+the rest. `principalDirections` is included as one convenient source, computing
+principal curvature directions, but it is optional and nothing in the pipeline
+assumes curvature.
 
 ## Build
 
@@ -52,22 +60,32 @@ order; without one they must cover every element of the mesh.
 | `batch` | | extract, write and exit without opening the viewer |
 | `arbitrary[=x,y,z]` | | ignore D1/D2 and use an arbitrary 4-RoSy (diagnostic) |
 
-### Example
+### Examples
 
-Generate a curvature-aligned field and remesh with it:
+Remesh with your own per-face frame field, in plain text, given on a subset of
+faces (the remaining faces are filled in by the interpolation):
 
 ```bash
 cd Quad_Remesher
+./build/quadRemesher mesh.obj D1.vec D2.vec frame_faces.dat \
+    --type vec --defined_on faces --out ./out --name mesh qex batch
+```
+
+The same with the field on vertices and covering the whole mesh, so no index
+file is needed:
+
+```bash
+./build/quadRemesher mesh.obj D1.vec D2.vec \
+    --type vec --defined_on vertices --out ./out --name mesh qex batch
+```
+
+If you have no field of your own, `principalDirections` generates one from
+principal curvature:
+
+```bash
 ./build/principalDirections ../test_meshes/lilium.obj /tmp/lil/
 ./build/quadRemesher ../test_meshes/lilium.obj /tmp/lil/D1.dmat /tmp/lil/D2.dmat \
     --out /tmp/lil --name lilium qex batch constraints=0.1
-```
-
-A per-face field in plain-text form, on a subset of faces:
-
-```bash
-./build/quadRemesher mesh.obj D1.vec D2.vec frame_faces.dat \
-    --type vec --defined_on faces --out ./out --name mesh qex batch
 ```
 
 ## Interactive viewer
@@ -100,17 +118,38 @@ green/purple dots are +1/4 and −1/4 singularities.
 
 ## Constraint density
 
-Constraining every face leaves the field solver no freedom and forces the field
-through every wobble of the input, each of which can become a singularity. Using
-a sparse subset (as libigl tutorial 506 does) gives markedly cleaner results —
-on the bundled test meshes, `constraints=0.1` reduces singularity counts by
-roughly 75–85%.
+How much of the mesh you constrain matters. Prescribing a frame on every face
+leaves the solver no freedom and forces the field through every local wobble of
+the input, each of which can become a singularity. Constraining a sparse subset
+and letting the solver interpolate — the way libigl tutorial 506 drives this —
+gives markedly cleaner results.
 
-## Notes
+Supply a sparse field directly via the index file, or thin a dense one with
+`constraints=<f>`, which keeps a farthest-point-sampled fraction of the
+constrained faces. On the bundled test meshes `constraints=0.1` reduces
+singularity counts by roughly 75–85%.
 
-`principalDirections` computes per-vertex principal curvature directions with
-`igl::principal_curvature` and writes them as DMAT, for use as D1/D2. It emits
-only the per-vertex field; the interpolation onto faces happens in
+## Field input
+
+D1 and D2 are the two representative directions of the frame at each element.
+They are projected into each face plane and need not be orthogonal; because the
+field is a 4-RoSy, the sign and the order of the two directions carry no
+meaning.
+
+Note that the directions are **normalized**, so their magnitudes are ignored:
+the field controls quad *orientation*, not quad size. Element size is set by
+the gradient-size parameter (`+` / `-` in the viewer) and is uniform. Feeding
+in frame lengths to drive anisotropic sizing, as in Panozzo et al., is not
+wired up.
+
+Rows correspond to every element of the mesh, or, when an index file is given,
+to the listed elements in that order. With `--defined_on vertices` a face is
+constrained only when all three of its vertices carry a direction.
+
+`principalDirections` is a helper, not part of the pipeline: it computes
+per-vertex principal curvature directions with `igl::principal_curvature` and
+writes them as DMAT, for use as D1/D2 when you have no field of your own. It
+emits only the per-vertex field; the interpolation onto faces happens in
 `quadRemesher`.
 
 ## References
