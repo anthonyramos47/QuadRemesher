@@ -193,8 +193,9 @@ handy as a starting point for your own field files.
 
 ## License
 
-GPLv3: the program links CoMISo and libQEx, which are GPLv3. The source is in
-this repository.
+GPLv3, see `LICENSE`: the program links CoMISo and libQEx, which are GPLv3.
+The source is at https://github.com/anthonyramos47/QuadRemesher. The bundled
+third-party components and their licenses are listed in `THIRD_PARTY_NOTICES.md`.
 
 ## References
 

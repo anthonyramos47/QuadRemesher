@@ -64,6 +64,11 @@ to attach the zips to a GitHub Release, or start it from the Actions tab
 - **Windows**: MSVC with the static runtime; CoMISo's OpenBLAS DLLs ship in `bin/`.
 - **macOS**: one universal (Apple Silicon + Intel) binary for macOS 11+, unsigned.
 
+## License
+
+GPLv3 (`LICENSE`). Third-party components and their licenses are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 ## References
 
 - Bommes et al., *Mixed-Integer Quadrangulation*, SIGGRAPH 2009

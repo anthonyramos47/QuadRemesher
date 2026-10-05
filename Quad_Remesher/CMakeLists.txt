@@ -171,7 +171,10 @@ endif()
 # `cmake --install build --component app --prefix <dir>` produces the release
 # bundle. The component keeps out the headers/libs the dependencies install.
 install(TARGETS quadRemesher principalDirections RUNTIME DESTINATION bin COMPONENT app)
-install(FILES README.md DESTINATION . COMPONENT app)
+install(FILES README.md
+              ${CMAKE_CURRENT_SOURCE_DIR}/../LICENSE
+              ${CMAKE_CURRENT_SOURCE_DIR}/../THIRD_PARTY_NOTICES.md
+        DESTINATION . COMPONENT app)
 if(WIN32)
     # CoMISo links OpenBLAS through an import library; ship its DLLs.
     FetchContent_GetProperties(comiso)
