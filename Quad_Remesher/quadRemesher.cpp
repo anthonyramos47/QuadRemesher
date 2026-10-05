@@ -1442,7 +1442,7 @@ int main(int argc, char *argv[])
     // 2. Comb the bisector field
     cout << "  Step 2: Combing bisector field..." << endl;
     MatrixXd BIS1_combed, BIS2_combed;
-    igl::comb_cross_field(V_deformed, F, X1_def, BIS2, BIS1_combed, BIS2_combed);
+    igl::comb_cross_field(V_deformed, F, BIS1, BIS2, BIS1_combed, BIS2_combed);
 
     // 3. Find the integer mismatches
     cout << "  Step 3: Computing mismatches..." << endl;
