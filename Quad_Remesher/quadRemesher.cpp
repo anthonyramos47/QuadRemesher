@@ -663,7 +663,7 @@ bool runMIQ(const MatrixXd& V_def, const MatrixXi& F,
             15,        // iterations
             5,         // local_iter
             true,     // do_round
-            false);    // singularityRound
+            true);     // singularityRound
     } else {
         cout << "Integration (integer solver)===================" << endl;
         igl::copyleft::comiso::miq(
@@ -677,7 +677,7 @@ bool runMIQ(const MatrixXd& V_def, const MatrixXi& F,
             15,        // iterations
             5,         // local_iter
             true,      // do_round
-            false);    // singularityRound
+            true);     // singularityRound
     }
 
     return true;
@@ -1677,7 +1677,7 @@ int main(int argc, char *argv[])
             15,
             5,
             true,
-            false);
+            true);    // singularityRound
         cout << "Done." << endl;
         return true;
     };
