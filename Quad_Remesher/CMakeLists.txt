@@ -7,17 +7,30 @@ if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)
     set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "Minimum CMake policy version for vendored deps")
 endif()
 
+# Portable-binary settings; must be set before project().
+# Windows: link the MSVC runtime statically so no VC++ redistributable is
+# needed. CMP0091 has to be NEW in the fetched sub-projects too, or they would
+# keep /MD and fail to link against our /MT objects.
+set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+# macOS: run on releases older than the build machine.
+if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
+endif()
+
 project(QuadRemesherMIQ)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Optimization flags
-if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
-    message(STATUS "Building for Apple Silicon (ARM64)")
+# Optimization flags. -march=native makes the binary crash with "illegal
+# instruction" on CPUs older than the build machine, so it is opt-in.
+option(QUADREMESHER_NATIVE "Optimize for this machine's CPU (binary is not portable)" OFF)
+if(NOT MSVC)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
-else()
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native")
+    if(QUADREMESHER_NATIVE)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
+    endif()
 endif()
 
 # Use FetchContent for dependencies
@@ -35,11 +48,19 @@ option(LIBIGL_COPYLEFT_COMISO "Build with CoMISo" ON)
 option(LIBIGL_OPENGL "Build with OpenGL" ON)
 option(LIBIGL_GLFW "Build with GLFW" ON)
 
+# CoMISo needs BLAS. On Linux prefer the static libblas.a so the shipped binary
+# does not depend on the target machine having libblas installed. (macOS uses
+# the system Accelerate framework; Windows uses CoMISo's bundled OpenBLAS DLL,
+# which is installed next to the executable below.)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT DEFINED BLA_STATIC)
+    set(BLA_STATIC ON)
+endif()
+
 FetchContent_MakeAvailable(libigl)
 
 # CoMISo's bundled GMM uses deprecated 'register' keyword (removed in C++17)
 # and deprecated sprintf. Suppress these as errors.
-if(TARGET CoMISo)
+if(TARGET CoMISo AND NOT MSVC)
     target_compile_options(CoMISo PRIVATE -Wno-register -Wno-deprecated-declarations)
 endif()
 
@@ -91,17 +112,28 @@ if(USE_LIBQEX)
         ${libqex_SOURCE_DIR}/interfaces/c
         ${libqex_SOURCE_DIR}/src
     )
-    target_link_libraries(qex PUBLIC OpenMeshCore)
+    # On Linux/macOS OpenMesh always builds a shared OpenMeshCore as well; link
+    # the static twin so the binary does not need libOpenMeshCore.so at runtime.
+    if(TARGET OpenMeshCoreStatic)
+        target_link_libraries(qex PUBLIC OpenMeshCoreStatic)
+    else()
+        target_link_libraries(qex PUBLIC OpenMeshCore)
+    endif()
 
     # QEx's exact predicates are only correct when the compiler does not emit
     # x87 extended-precision code. SSE2 is the default on x86-64, but upstream
     # forces it explicitly, so do the same.
-    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i[36]86")
+    # (MSVC targeting x64 always uses SSE2, so it needs nothing here.)
+    if(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i[36]86")
         target_compile_options(qex PRIVATE -msse2 -mfpmath=sse)
     endif()
     target_compile_definitions(qex PUBLIC HAVE_LIBQEX)
     # Upstream 2013 code, compiled against a far newer OpenMesh: quiet its warnings.
-    target_compile_options(qex PRIVATE -w)
+    if(MSVC)
+        target_compile_options(qex PRIVATE /w)
+    else()
+        target_compile_options(qex PRIVATE -w)
+    endif()
 endif()
 
 # Main executable with MIQ support
@@ -122,7 +154,36 @@ endif()
 add_executable(principalDirections principalDirections.cpp)
 target_link_libraries(principalDirections igl::core)
 # GMM headers from CoMISo leak into our compilation unit via header-only includes
-target_compile_options(quadRemesher PRIVATE -Wno-register -Wno-deprecated-declarations)
+if(MSVC)
+    target_compile_options(quadRemesher PRIVATE /bigobj)
+    target_compile_definitions(quadRemesher PRIVATE _USE_MATH_DEFINES NOMINMAX)
+else()
+    target_compile_options(quadRemesher PRIVATE -Wno-register -Wno-deprecated-declarations)
+endif()
+
+# Linux: bake in libstdc++/libgcc so the binary does not depend on the build
+# machine's compiler version (glibc, libGL and X11 still come from the system).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(quadRemesher PRIVATE -static-libstdc++ -static-libgcc)
+    target_link_options(principalDirections PRIVATE -static-libstdc++ -static-libgcc)
+endif()
+
+# `cmake --install build --component app --prefix <dir>` produces the release
+# bundle. The component keeps out the headers/libs the dependencies install.
+install(TARGETS quadRemesher principalDirections RUNTIME DESTINATION bin COMPONENT app)
+install(FILES README.md DESTINATION . COMPONENT app)
+if(WIN32)
+    # CoMISo links OpenBLAS through an import library; ship its DLLs.
+    FetchContent_GetProperties(comiso)
+    file(GLOB COMISO_BLAS_DLLS "${comiso_SOURCE_DIR}/ext/OpenBLAS-v0.2.14-Win64-int64/bin/*.dll")
+    install(FILES ${COMISO_BLAS_DLLS} DESTINATION bin COMPONENT app)
+endif()
+set(CPACK_GENERATOR "ZIP")
+set(CPACK_PACKAGE_NAME "QuadRemesher")
+set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY ON)
+set(CPACK_COMPONENTS_ALL app)
+set(CPACK_ARCHIVE_COMPONENT_INSTALL OFF)
+include(CPack)
 
 message(STATUS "")
 message(STATUS "==========================================")

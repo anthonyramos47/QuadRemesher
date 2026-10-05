@@ -39,7 +39,7 @@
 #include <array>
 #include <functional>
 #include <sstream>
-#include <sys/stat.h>
+#include <filesystem>
 #include <limits>
 #include <algorithm>
 #include <igl/opengl/glfw/Viewer.h>
@@ -823,8 +823,8 @@ int main(int argc, char *argv[])
             if (positional == 1) {
                 // A readable *file* here is the frame index list; a directory
                 // (or a non-existent path) is the legacy [output_folder].
-                struct stat st{};
-                const bool isFile = (stat(arg.c_str(), &st) == 0) && S_ISREG(st.st_mode);
+                std::error_code ec;
+                const bool isFile = std::filesystem::is_regular_file(arg, ec);
                 if (isFile) frame_index_file = arg;
                 else out_folder = arg;
             } else if (positional == 2 && out_folder.empty()) {

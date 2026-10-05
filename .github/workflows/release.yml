@@ -1,0 +1,77 @@
+# Builds portable quadRemesher + principalDirections binaries for Linux,
+# Windows and macOS. Every run uploads them as workflow artifacts; pushing a
+# tag like v1.0.0 also attaches the zips to a GitHub Release.
+name: build-binaries
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Oldest supported Ubuntu runner => oldest glibc => widest Linux reach.
+          - { os: ubuntu-22.04, name: linux-x86_64, cmake_extra: "" }
+          - { os: windows-latest, name: windows-x86_64, cmake_extra: "" }
+          # One universal binary for Apple Silicon and Intel Macs.
+          - { os: macos-14, name: macos-universal, cmake_extra: '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64' }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: Quad_Remesher
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux GLFW/OpenGL build deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xorg-dev libgl1-mesa-dev libblas-dev gfortran
+
+      - name: Configure
+        run: |
+          EXTRA=()
+          [ -n "${{ matrix.cmake_extra }}" ] && EXTRA+=("${{ matrix.cmake_extra }}")
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release "${EXTRA[@]}"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Install into bundle
+        run: cmake --install build --config Release --component app --prefix "../QuadRemesher-${{ matrix.name }}"
+
+      - name: Smoke test
+        working-directory: .
+        run: |
+          B="QuadRemesher-${{ matrix.name }}/bin"
+          mkdir -p smoke
+          "$B/principalDirections" test_meshes/lilium.obj smoke/
+          "$B/quadRemesher" test_meshes/lilium.obj smoke/D1.dmat smoke/D2.dmat \
+              --out smoke --name lilium qex batch constraints=0.1
+          test -s smoke/lilium_Remeshed.obj
+
+      - name: Zip
+        working-directory: .
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a "QuadRemesher-${{ matrix.name }}.zip" "QuadRemesher-${{ matrix.name }}"
+          else
+            zip -r "QuadRemesher-${{ matrix.name }}.zip" "QuadRemesher-${{ matrix.name }}"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QuadRemesher-${{ matrix.name }}
+          path: QuadRemesher-${{ matrix.name }}.zip
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: QuadRemesher-${{ matrix.name }}.zip
