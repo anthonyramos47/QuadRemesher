@@ -7,6 +7,8 @@
 // 3. Quad extraction from UV grid
 
 #include <igl/readOBJ.h>
+#include <igl/readOFF.h>
+#include <igl/list_to_matrix.h>
 #include <igl/writeOBJ.h>
 #include <igl/readDMAT.h>
 #include <igl/comb_cross_field.h>
@@ -31,6 +33,7 @@
 #include <igl/principal_curvature.h>
 #include <igl/writeDMAT.h>
 #include <Eigen/Core>
+#include <Eigen/Eigenvalues>
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -688,191 +691,211 @@ int main(int argc, char *argv[])
     // ---------------------------------------------------------------------
     // Command line
     //
-    //   quadRemesher mesh.obj D1 D2 [frame_indices] [options]
-    //
-    // Options are flags (--type, --defined_on, --out, --name) plus the older
-    // bare keywords (direct/integration, grid/qex, batch, ...), which still
-    // work so existing scripts keep running.
+    //   quadRemesher <mesh.obj|mesh.off> [options]      (see usage())
     // ---------------------------------------------------------------------
     auto usage = [&]() {
-        cout << "Usage: ./quadRemesher <mesh.obj> <D1> <D2> [frame_indices] [options]" << endl;
-        cout << endl;
-        cout << "  D1, D2            per-direction files (see --type). One row per element:" << endl;
-        cout << "                    all elements of the mesh, or -- if an index file is" << endl;
-        cout << "                    given -- one row per listed index, in that order." << endl;
-        cout << "  frame_indices     optional; whitespace-separated indices of the faces or" << endl;
-        cout << "                    vertices the rows of D1/D2 refer to. Omit to mean all." << endl;
-        cout << endl;
-        cout << "  --type DMAT|vec   input format (default DMAT). 'vec' is one 'vx vy vz'" << endl;
-        cout << "                    per line." << endl;
-        cout << "  --defined_on vertices|faces" << endl;
-        cout << "                    where the directions live (default vertices). Vertex" << endl;
-        cout << "                    fields are averaged onto each face barycenter and" << endl;
-        cout << "                    projected into the face plane; face fields are used" << endl;
-        cout << "                    as given (still projected into the face plane)." << endl;
-        cout << "  --out <folder>    output folder      --name <name>  output basename" << endl;
-        cout << endl;
-        cout << "  method:    'direct' (default, skip integer solver) or 'integration'" << endl;
-        cout << "  extractor: 'grid' (default, built-in) or 'qex' (libQEx, implies 'integration')" << endl;
-        cout << "  batch:     extract, save and exit without opening the viewer" << endl;
-        cout << "  dumpfields:        write the intermediate fields as DMAT" << endl;
-        cout << "  arbitrary[=x,y,z]  ignore D1/D2; constrain to an arbitrary 4-RoSy instead" << endl;
-        cout << "  constraints=<f>    keep only fraction f of the constraint faces (default 1.0)" << endl;
+        cout <<
+"Usage: quadRemesher <mesh.obj|mesh.off> [options]\n"
+"\n"
+"Input mesh: a triangle mesh, OBJ or OFF.\n"
+"\n"
+"Frame field  --field data|principal|conjugate|orthogonal   (default data)\n"
+"  data        directions read from files:\n"
+"                --d1 FILE  --d2 FILE   first / second direction, one per row\n"
+"                --indices FILE         optional: the vertex or face index each row\n"
+"                                       belongs to (omit = one row per element)\n"
+"                --defined_on vertices|faces   where the rows live (default vertices)\n"
+"                --format vec|dmat      vec: 'vx vy vz' per line (default)\n"
+"                                       dmat: libigl DMAT\n"
+"  principal   principal curvature directions (igl::principal_curvature)\n"
+"  conjugate   conjugate directions w.r.t. the second fundamental form:\n"
+"                with --d1 (+ --indices/--defined_on/--format): D2 = conjugate of D1\n"
+"                with --angle DEG: per face, D1 = first principal direction\n"
+"                          rotated by DEG in the face plane; D2 = its conjugate\n"
+"                with neither: symmetric conjugate pair where K > 0,\n"
+"                          principal directions elsewhere\n"
+"  orthogonal  smoothest orthogonal cross field, no input (libigl tutorial 504)\n"
+"\n"
+"  --radius R        k-ring radius for curvature (principal, conjugate; default 5)\n"
+"  --constraints F   keep a fraction F in (0,1] of the constrained faces, spread\n"
+"                    evenly over the surface; the rest is interpolated (default 1)\n"
+"\n"
+"Integration and extraction\n"
+"  --gradient H      integration gradient size; higher = denser quads (default 40)\n"
+"  --extractor qex|grid   quad extractor (default qex)\n"
+"\n"
+"Run\n"
+"  --batch           no viewer: integrate, extract, write the quad mesh and exit\n"
+"  --out DIR         output folder (default: current folder; created if missing)\n"
+"  --name NAME       output file is DIR/NAME_Remeshed.obj (default: mesh name)\n"
+"  --dump-fields     also write the intermediate fields as DMAT\n";
     };
 
-    if (argc < 4) { usage(); return 1; }
+    if (argc < 2) { usage(); return 1; }
+    for (int i = 1; i < argc; i++) {
+        const string a = argv[i];
+        if (a == "--help" || a == "-h") { usage(); return 0; }
+    }
 
-    bool use_direct_round = true;
-    bool method_explicit = false;
+    enum class FieldSource { Data, Principal, Conjugate, Orthogonal };
+    FieldSource field_source = FieldSource::Data;
+    const string mesh_file = argv[1];
+    string d1_file, d2_file, frame_index_file;
+    bool input_is_vec = true;           // --format
+    bool defined_on_faces = false;      // --defined_on
+    int curvature_radius = 5;
+    double conj_angle_deg = 0.0;        // --angle (conjugate)
+    bool conj_angle_set = false;
+    double constraint_fraction = 1.0;
+    double miq_gradient_size = 40.0;    // MIQ gradient size: higher = denser quads
+#ifdef HAVE_LIBQEX
+    bool use_qex = true;
+#else
     bool use_qex = false;
+#endif
     bool batch_mode = false;
     bool dump_fields = false;
     string field_dump_prefix = "fields";
-    double constraint_fraction = 1.0;
-    bool arbitrary_field = false;
-    Vector3d arbitrary_dir(1.0, 0.0, 0.0);
+    string out_folder;
+    string out_name;
 
-    bool input_is_vec = false;          // --type
-    bool defined_on_faces = false;      // --defined_on
-    string frame_index_file;            // optional 4th positional
-    string out_folder;                  // --out  / 4th-5th positional (legacy)
-    string out_name;                    // --name
-
-    // Keywords that may appear as bare positional arguments; anything else in
-    // positional slot 4/5 is treated as the legacy [output_folder] [name].
-    auto isKeyword = [](const string& a) {
-        return a == "direct" || a == "integration" || a == "qex" || a == "grid" ||
-               a == "batch" || a == "dumpfields" || a == "arbitrary" ||
-               a.rfind("arbitrary=", 0) == 0 || a.rfind("constraints=", 0) == 0 ||
-               a.rfind("--", 0) == 0;
-    };
-
-    int positional = 0;                 // counts non-keyword args after argv[3]
-    for (int i = 4; i < argc; i++) {
+    for (int i = 2; i < argc; i++) {
         const string arg = argv[i];
-
-        if (arg == "--type" || arg == "--defined_on" || arg == "--out" || arg == "--name") {
-            if (i + 1 >= argc) {
-                cerr << "Error: " << arg << " needs a value." << endl;
-                return 1;
-            }
-            const string val = argv[++i];
-            if (arg == "--type") {
-                if (val == "vec" || val == "VEC") input_is_vec = true;
-                else if (val == "DMAT" || val == "dmat") input_is_vec = false;
-                else { cerr << "Error: --type must be DMAT or vec, got '" << val << "'" << endl; return 1; }
+        if (arg == "--batch")       { batch_mode = true;  continue; }
+        if (arg == "--dump-fields") { dump_fields = true; continue; }
+        if (arg.rfind("--", 0) != 0) {
+            cerr << "Error: unexpected argument '" << arg << "' (see --help)." << endl;
+            return 1;
+        }
+        if (i + 1 >= argc) {
+            cerr << "Error: " << arg << " needs a value." << endl;
+            return 1;
+        }
+        const string val = argv[++i];
+        try {
+            if (arg == "--field") {
+                if      (val == "data")       field_source = FieldSource::Data;
+                else if (val == "principal")  field_source = FieldSource::Principal;
+                else if (val == "conjugate")  field_source = FieldSource::Conjugate;
+                else if (val == "orthogonal") field_source = FieldSource::Orthogonal;
+                else { cerr << "Error: --field must be data, principal, conjugate or orthogonal, got '" << val << "'." << endl; return 1; }
+            } else if (arg == "--d1") {
+                d1_file = val;
+            } else if (arg == "--d2") {
+                d2_file = val;
+            } else if (arg == "--indices") {
+                frame_index_file = val;
             } else if (arg == "--defined_on") {
                 if (val == "faces" || val == "face") defined_on_faces = true;
                 else if (val == "vertices" || val == "vertex") defined_on_faces = false;
-                else { cerr << "Error: --defined_on must be vertices or faces, got '" << val << "'" << endl; return 1; }
+                else { cerr << "Error: --defined_on must be vertices or faces, got '" << val << "'." << endl; return 1; }
+            } else if (arg == "--format") {
+                if (val == "vec" || val == "VEC") input_is_vec = true;
+                else if (val == "dmat" || val == "DMAT") input_is_vec = false;
+                else { cerr << "Error: --format must be vec or dmat, got '" << val << "'." << endl; return 1; }
+            } else if (arg == "--angle") {
+                conj_angle_deg = stod(val);
+                conj_angle_set = true;
+            } else if (arg == "--radius") {
+                curvature_radius = stoi(val);
+                if (curvature_radius < 1) { cerr << "Error: --radius must be >= 1." << endl; return 1; }
+            } else if (arg == "--constraints") {
+                constraint_fraction = stod(val);
+                if (!(constraint_fraction > 0.0) || constraint_fraction > 1.0) {
+                    cerr << "Error: --constraints must be in (0, 1], got " << val << "." << endl;
+                    return 1;
+                }
+            } else if (arg == "--gradient") {
+                miq_gradient_size = stod(val);
+                if (!(miq_gradient_size > 0.0)) { cerr << "Error: --gradient must be > 0." << endl; return 1; }
+            } else if (arg == "--extractor") {
+                if (val == "qex") use_qex = true;
+                else if (val == "grid") use_qex = false;
+                else { cerr << "Error: --extractor must be qex or grid, got '" << val << "'." << endl; return 1; }
             } else if (arg == "--out") {
                 out_folder = val;
-            } else {
+            } else if (arg == "--name") {
                 out_name = val;
-            }
-            continue;
-        }
-
-        if (arg == "--help" || arg == "-h") { usage(); return 0; }
-
-        if (arg == "integration") {
-            use_direct_round = false; method_explicit = true;
-            cout << "Using integration method (integer solver)" << endl;
-        } else if (arg == "direct") {
-            use_direct_round = true; method_explicit = true;
-            cout << "Using direct method (skip integer solver)" << endl;
-        } else if (arg == "qex") {
-            use_qex = true;
-        } else if (arg == "grid") {
-            use_qex = false;
-        } else if (arg == "batch") {
-            batch_mode = true;
-        } else if (arg == "dumpfields") {
-            dump_fields = true;
-        } else if (arg == "arbitrary") {
-            arbitrary_field = true;
-        } else if (arg.rfind("arbitrary=", 0) == 0) {
-            arbitrary_field = true;
-            const string v = arg.substr(10);
-            double c[3] = {1.0, 0.0, 0.0};
-            size_t start = 0;
-            for (int k = 0; k < 3 && start <= v.size(); k++) {
-                size_t comma = v.find(',', start);
-                const string tok = v.substr(start, comma == string::npos ? string::npos : comma - start);
-                if (!tok.empty()) { try { c[k] = stod(tok); } catch (const exception&) {} }
-                if (comma == string::npos) break;
-                start = comma + 1;
-            }
-            arbitrary_dir = Vector3d(c[0], c[1], c[2]);
-            if (arbitrary_dir.norm() < 1e-12) arbitrary_dir = Vector3d(1, 0, 0);
-        } else if (arg.rfind("constraints=", 0) == 0) {
-            try {
-                constraint_fraction = stod(arg.substr(12));
-            } catch (const exception&) {
-                cerr << "Could not parse '" << arg << "'; expected e.g. constraints=0.1" << endl;
+            } else {
+                cerr << "Error: unknown option '" << arg << "' (see --help)." << endl;
                 return 1;
             }
-            if (!(constraint_fraction > 0.0) || constraint_fraction > 1.0) {
-                cerr << "constraints= must be in (0, 1], got " << constraint_fraction << endl;
-                return 1;
-            }
-        } else if (!isKeyword(arg)) {
-            // Positional. The first is the frame index file if it exists on
-            // disk; otherwise fall back to the legacy [output_folder] [name].
-            positional++;
-            if (positional == 1) {
-                // A readable *file* here is the frame index list; a directory
-                // (or a non-existent path) is the legacy [output_folder].
-                std::error_code ec;
-                const bool isFile = std::filesystem::is_regular_file(arg, ec);
-                if (isFile) frame_index_file = arg;
-                else out_folder = arg;
-            } else if (positional == 2 && out_folder.empty()) {
-                out_folder = arg;
-            } else if (out_name.empty()) {
-                out_name = arg;
-            }
-        } else {
-            cerr << "Unknown option '" << arg << "'" << endl;
+        } catch (const exception&) {
+            cerr << "Error: could not parse '" << val << "' for " << arg << "." << endl;
             return 1;
         }
     }
 
-    // Field dumps land next to the quad mesh, under the output folder if given.
-    if (dump_fields && !out_folder.empty()) {
-        field_dump_prefix = out_folder + (out_folder.back() == '/' ? "" : "/") + "fields";
+    string mesh_ext = std::filesystem::path(mesh_file).extension().string();
+    transform(mesh_ext.begin(), mesh_ext.end(), mesh_ext.begin(), ::tolower);
+    if (mesh_ext != ".obj" && mesh_ext != ".off") {
+        cerr << "Error: " << mesh_file << ": unsupported format '" << mesh_ext << "' (use .obj or .off)." << endl;
+        return 1;
     }
+
+    // Which field inputs each source takes.
+    const bool reads_d1 = field_source == FieldSource::Data ||
+                          (field_source == FieldSource::Conjugate && !conj_angle_set && !d1_file.empty());
+    if (conj_angle_set && field_source != FieldSource::Conjugate)
+        cerr << "Note: --angle only applies to --field conjugate; ignored." << endl;
+    const bool reads_d2 = field_source == FieldSource::Data;
+    if (field_source == FieldSource::Data && (d1_file.empty() || d2_file.empty())) {
+        cerr << "Error: --field data needs --d1 and --d2 (see --help)." << endl;
+        return 1;
+    }
+    if ((!reads_d1 && (!d1_file.empty() || !frame_index_file.empty())) ||
+        (!reads_d2 && !d2_file.empty())) {
+        cerr << "Note: direction files not used by this --field are ignored." << endl;
+    }
+
+    if (out_name.empty()) out_name = std::filesystem::path(mesh_file).stem().string();
+    if (!out_folder.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(out_folder, ec);
+        if (ec) { cerr << "Error: could not create output folder " << out_folder << ": " << ec.message() << endl; return 1; }
+    }
+    if (dump_fields && !out_folder.empty())
+        field_dump_prefix = (std::filesystem::path(out_folder) / "fields").string();
 
 #ifndef HAVE_LIBQEX
     if (use_qex) {
-        cerr << "This binary was built without libQEx (USE_LIBQEX=OFF)." << endl;
-        cerr << "Reconfigure with -DUSE_LIBQEX=ON to use the 'qex' extractor." << endl;
+        cerr << "This binary was built without libQEx (USE_LIBQEX=OFF); use --extractor grid." << endl;
         return 1;
     }
 #endif
 
-    // libQEx consumes an integer-grid map. MIQ only produces one when the
-    // integer solver runs, i.e. direct_round=false. Force it, and say so if the
-    // user explicitly asked for 'direct'.
-    if (use_qex && use_direct_round) {
-        if (method_explicit) {
-            cout << "NOTE: 'qex' requires an integer-grid map; overriding 'direct'"
-                    " with 'integration'." << endl;
-        } else {
-            cout << "Using integration method (required by the 'qex' extractor)" << endl;
-        }
-        use_direct_round = false;
-    }
+    // libQEx consumes an integer-grid map, which MIQ only produces when its
+    // integer solver runs (direct_round=false). The grid extractor works on
+    // the direct (non-rounded) solve.
+    const bool use_direct_round = !use_qex;
+    cout << "Extractor: " << (use_qex ? "libQEx" : "built-in grid")
+         << ", gradient size " << miq_gradient_size << endl;
 
-    cout << "Extractor: " << (use_qex ? "libQEx" : "built-in grid") << endl;
-
-    // 1. Load Mesh
+    // 1. Load the mesh (OBJ or OFF) and insist on triangles.
     MatrixXd V;
     MatrixXi F;
     MatrixXd B;
     MatrixXd B_deformed;
-
-    igl::readOBJ(argv[1], V, F);
+    {
+        vector<vector<double>> vV, vTC, vN, vC;
+        vector<vector<int>> vF, vFTC, vFN;
+        const bool ok = (mesh_ext == ".obj") ? igl::readOBJ(mesh_file, vV, vTC, vN, vF, vFTC, vFN)
+                                             : igl::readOFF(mesh_file, vV, vF, vN, vC);
+        if (!ok || vV.empty() || vF.empty()) {
+            cerr << "Error: could not read a mesh from " << mesh_file << "." << endl;
+            return 1;
+        }
+        for (size_t f = 0; f < vF.size(); f++) {
+            if (vF[f].size() != 3) {
+                cerr << "Error: " << mesh_file << " is not a triangle mesh (face " << f
+                     << " has " << vF[f].size() << " vertices). Triangulate it first." << endl;
+                return 1;
+            }
+        }
+        igl::list_to_matrix(vV, V);
+        igl::list_to_matrix(vF, F);
+        if (V.cols() != 3) { cerr << "Error: vertices must be 3D." << endl; return 1; }
+    }
     cout << "Loaded mesh: " << V.rows() << " vertices, " << F.rows() << " faces" << endl;
 
     // Compute face barycenters
@@ -882,73 +905,249 @@ int main(int argc, char *argv[])
     double avg_edge_len = igl::avg_edge_length(V, F);
     global_scale = avg_edge_len * 0.4;
 
-    // 2. Load D1 and D2. Rows correspond either to every element of the mesh,
-    //    or -- when a frame index file is given -- to the listed indices in
-    //    order. Elements are vertices or faces depending on --defined_on.
-    MatrixXd D1_in, D2_in;
-    if (!loadDirections(argv[2], input_is_vec, D1_in) ||
-        !loadDirections(argv[3], input_is_vec, D2_in)) {
-        return 1;
-    }
-    if (D1_in.rows() != D2_in.rows()) {
-        cerr << "Error: D1 has " << D1_in.rows() << " rows but D2 has "
-             << D2_in.rows() << "." << endl;
-        return 1;
-    }
+    // 2. Build the input field: per-element D1/D2 on vertices or faces, with
+    //    hasDir marking which elements carry a direction.
+    MatrixXd D1_elem, D2_elem;
+    vector<bool> hasDir;
+    int numElements = 0;
 
-    const int numElements = defined_on_faces ? (int)F.rows() : (int)V.rows();
-    const char* elementName = defined_on_faces ? "face" : "vertex";
-    const char* elementPlural = defined_on_faces ? "faces" : "vertices";
+    // Curvature (principal / conjugate): per-vertex principal directions and
+    // curvatures, plus the per-vertex shape operator S = k1 e1e1^T + k2 e2e2^T.
+    MatrixXd PD1, PD2;
+    VectorXd PV1, PV2;
+    auto computeCurvature = [&]() {
+        cout << "Computing principal curvature (k-ring radius " << curvature_radius << ")..." << endl;
+        igl::principal_curvature(V, F, PD1, PD2, PV1, PV2, curvature_radius);
+    };
+    auto shapeOperator = [&](int vi) -> Matrix3d {
+        const Vector3d e1 = PD1.row(vi).normalized(), e2 = PD2.row(vi).normalized();
+        return PV1(vi) * e1 * e1.transpose() + PV2(vi) * e2 * e2.transpose();
+    };
 
-    vector<int> frameIdx;
-    if (!frame_index_file.empty()) {
-        if (!readIndexFile(frame_index_file, frameIdx)) return 1;
-        if ((int)frameIdx.size() != D1_in.rows()) {
-            cerr << "Error: " << frame_index_file << " lists " << frameIdx.size()
-                 << " indices but D1/D2 have " << D1_in.rows() << " rows." << endl;
-            return 1;
-        }
-        for (int id : frameIdx) {
-            if (id < 0 || id >= numElements) {
-                cerr << "Error: index " << id << " in " << frame_index_file
-                     << " is out of range (mesh has " << numElements << " "
-                     << (numElements == 1 ? elementName : elementPlural) << ")." << endl;
-                return 1;
+    // Read D1 (and D2) plus the optional index file into per-element arrays.
+    auto loadFieldFiles = [&](bool withD2) -> bool {
+        numElements = defined_on_faces ? (int)F.rows() : (int)V.rows();
+        const char* elementPlural = defined_on_faces ? "faces" : "vertices";
+        MatrixXd D1_in, D2_in;
+        if (!loadDirections(d1_file, input_is_vec, D1_in)) return false;
+        if (withD2) {
+            if (!loadDirections(d2_file, input_is_vec, D2_in)) return false;
+            if (D1_in.rows() != D2_in.rows()) {
+                cerr << "Error: D1 has " << D1_in.rows() << " rows but D2 has " << D2_in.rows() << "." << endl;
+                return false;
             }
         }
-    } else {
-        // No index file: the rows must cover every element, in order.
-        if (D1_in.rows() != numElements) {
-            cerr << "Error: D1/D2 have " << D1_in.rows() << " rows but the mesh has "
-                 << numElements << " " << (numElements == 1 ? elementName : elementPlural)
-                 << ". Provide a frame index file to specify a subset." << endl;
-            return 1;
+        vector<int> frameIdx;
+        if (!frame_index_file.empty()) {
+            if (!readIndexFile(frame_index_file, frameIdx)) return false;
+            if ((int)frameIdx.size() != D1_in.rows()) {
+                cerr << "Error: " << frame_index_file << " lists " << frameIdx.size()
+                     << " indices but D1 has " << D1_in.rows() << " rows." << endl;
+                return false;
+            }
+            for (int id : frameIdx) {
+                if (id < 0 || id >= numElements) {
+                    cerr << "Error: index " << id << " in " << frame_index_file << " is out of range (mesh has "
+                         << numElements << " " << elementPlural << "; indices are 0-based)." << endl;
+                    return false;
+                }
+            }
+        } else {
+            if (D1_in.rows() != numElements) {
+                cerr << "Error: D1 has " << D1_in.rows() << " rows but the mesh has " << numElements << " "
+                     << elementPlural << ". Give --indices to specify a subset." << endl;
+                return false;
+            }
+            frameIdx.resize(numElements);
+            for (int i = 0; i < numElements; i++) frameIdx[i] = i;
         }
-        frameIdx.resize(numElements);
-        for (int i = 0; i < numElements; i++) frameIdx[i] = i;
+        D1_elem = MatrixXd::Zero(numElements, 3);
+        D2_elem = MatrixXd::Zero(numElements, 3);
+        hasDir.assign(numElements, false);
+        for (size_t r = 0; r < frameIdx.size(); r++) {
+            D1_elem.row(frameIdx[r]) = D1_in.row((int)r);
+            if (withD2) D2_elem.row(frameIdx[r]) = D2_in.row((int)r);
+            hasDir[frameIdx[r]] = true;
+        }
+        cout << "Loaded " << D1_in.rows() << (withD2 ? " direction pairs" : " directions")
+             << " on " << elementPlural << " (" << (input_is_vec ? "vec" : "DMAT") << " format)." << endl;
+        return true;
+    };
+
+    switch (field_source) {
+    case FieldSource::Data:
+        cout << "Field: data" << endl;
+        if (!loadFieldFiles(true)) return 1;
+        break;
+
+    case FieldSource::Principal: {
+        cout << "Field: principal curvature directions" << endl;
+        computeCurvature();
+        defined_on_faces = false;
+        numElements = (int)V.rows();
+        D1_elem = PD1;
+        D2_elem = PD2;
+        hasDir.assign(numElements, false);
+        for (int i = 0; i < numElements; i++)
+            hasDir[i] = PD1.row(i).allFinite() && PD2.row(i).allFinite();
+        break;
     }
 
-    cout << "Loaded " << D1_in.rows() << " direction pairs defined on "
-         << elementPlural
-         << " (" << (input_is_vec ? "vec" : "DMAT") << " format)." << endl;
-    cout << "Mesh has " << V.rows() << " vertices, " << F.rows() << " faces." << endl;
+    case FieldSource::Conjugate: {
+        computeCurvature();
+        MatrixXd VN;
+        igl::per_vertex_normals(V, F, VN);
+        // Curvature magnitude below which the surface counts as flat there.
+        const double flat = 1e-3 / avg_edge_len;
+        int dropped = 0;
 
-    // Scatter the supplied rows into full per-element arrays, tracking which
-    // elements actually received a direction.
-    MatrixXd D1_elem = MatrixXd::Zero(numElements, 3);
-    MatrixXd D2_elem = MatrixXd::Zero(numElements, 3);
-    vector<bool> hasDir(numElements, false);
-    for (size_t r = 0; r < frameIdx.size(); r++) {
-        D1_elem.row(frameIdx[r]) = D1_in.row((int)r);
-        D2_elem.row(frameIdx[r]) = D2_in.row((int)r);
-        hasDir[frameIdx[r]] = true;
+        // D2 conjugate to D1, i.e. II(D1, D2) = 0, which in the tangent plane
+        // is D2 = n x (S D1). False where it is undefined: flat, or D1 close to
+        // an asymptotic direction (where the conjugate coincides with D1).
+        auto conjugateOf = [&](const Matrix3d& S, const Vector3d& n, Vector3d& d1, Vector3d& d2) -> bool {
+            d1 -= d1.dot(n) * n;
+            if (d1.norm() < 1e-9) return false;
+            d1.normalize();
+            const Vector3d Sd1 = S * d1;
+            d2 = n.cross(Sd1 - Sd1.dot(n) * n);
+            if (d2.norm() < flat || d1.cross(d2.normalized()).norm() < sin(5.0 * igl::PI / 180.0))
+                return false;
+            d2.normalize();
+            return true;
+        };
+
+        if (conj_angle_set) {
+            // Constant angle: on each face, D1 = the first principal direction
+            // of the face's (averaged) shape operator rotated by the angle in
+            // the face plane; D2 = its conjugate.
+            cout << "Field: conjugate, D1 at " << conj_angle_deg
+                 << " deg from the first principal direction" << endl;
+            const double t = conj_angle_deg * igl::PI / 180.0;
+            MatrixXd FNc;
+            igl::per_face_normals(V, F, FNc);
+            defined_on_faces = true;
+            numElements = (int)F.rows();
+            D1_elem = MatrixXd::Zero(numElements, 3);
+            D2_elem = MatrixXd::Zero(numElements, 3);
+            hasDir.assign(numElements, false);
+            for (int f = 0; f < numElements; f++) {
+                if (!PD1.row(F(f, 0)).allFinite() || !PD1.row(F(f, 1)).allFinite() ||
+                    !PD1.row(F(f, 2)).allFinite()) { dropped++; continue; }
+                const Matrix3d S = (shapeOperator(F(f, 0)) + shapeOperator(F(f, 1)) + shapeOperator(F(f, 2))) / 3.0;
+                const Vector3d n = FNc.row(f);
+                // Principal directions of S restricted to the face plane.
+                const Vector3d t1 = (V.row(F(f, 1)) - V.row(F(f, 0))).normalized();
+                const Vector3d t2 = n.cross(t1);
+                Matrix2d M;
+                M << t1.dot(S * t1), t1.dot(S * t2), t2.dot(S * t1), t2.dot(S * t2);
+                SelfAdjointEigenSolver<Matrix2d> es(M);
+                const Vector2d a = es.eigenvectors().col(1);    // largest = first principal (as PD1)
+                const Vector3d e1 = (a(0) * t1 + a(1) * t2).normalized();
+                const Vector3d e2 = n.cross(e1);
+                Vector3d d1 = cos(t) * e1 + sin(t) * e2, d2;
+                if (!conjugateOf(S, n, d1, d2)) { dropped++; continue; }
+                D1_elem.row(f) = d1.transpose();
+                D2_elem.row(f) = d2.transpose();
+                hasDir[f] = true;
+            }
+            if (dropped)
+                cout << "  " << dropped << " faces dropped (flat, or the angle is close to an asymptotic direction)." << endl;
+        } else if (!d1_file.empty()) {
+            // D1 given: D2 is the direction conjugate to it.
+            cout << "Field: conjugate of the given D1" << endl;
+            if (!loadFieldFiles(false)) return 1;
+            MatrixXd FNc;
+            igl::per_face_normals(V, F, FNc);
+            for (int e = 0; e < numElements; e++) {
+                if (!hasDir[e]) continue;
+                Matrix3d S;
+                Vector3d n;
+                if (defined_on_faces) {
+                    S = (shapeOperator(F(e, 0)) + shapeOperator(F(e, 1)) + shapeOperator(F(e, 2))) / 3.0;
+                    n = FNc.row(e);
+                } else {
+                    S = shapeOperator(e);
+                    n = VN.row(e);
+                }
+                n.normalize();
+                Vector3d d1 = D1_elem.row(e), d2;
+                if (!conjugateOf(S, n, d1, d2)) {
+                    hasDir[e] = false;
+                    dropped++;
+                    continue;
+                }
+                D1_elem.row(e) = d1.transpose();
+                D2_elem.row(e) = d2.transpose();
+            }
+            if (dropped)
+                cout << "  " << dropped << " elements dropped (flat, or D1 close to an asymptotic direction)." << endl;
+        } else {
+            // No D1: the symmetric conjugate pair about the principal axes,
+            // u,v = cos(t) e1 +- sin(t) e2 with tan^2(t) = k1/k2. It exists only
+            // where K = k1 k2 > 0; elsewhere fall back to the principal pair
+            // (which is itself conjugate).
+            cout << "Field: symmetric conjugate pair (principal where K <= 0)" << endl;
+            defined_on_faces = false;
+            numElements = (int)V.rows();
+            D1_elem = MatrixXd::Zero(numElements, 3);
+            D2_elem = MatrixXd::Zero(numElements, 3);
+            hasDir.assign(numElements, false);
+            int symmetric = 0;
+            for (int i = 0; i < numElements; i++) {
+                if (!PD1.row(i).allFinite() || !PD2.row(i).allFinite()) continue;
+                const Vector3d e1 = PD1.row(i).normalized(), e2 = PD2.row(i).normalized();
+                const double k1 = PV1(i), k2 = PV2(i);
+                if (k1 * k2 > 0 && fabs(k1) > flat && fabs(k2) > flat) {
+                    const double t = atan(sqrt(k1 / k2));
+                    D1_elem.row(i) = (cos(t) * e1 + sin(t) * e2).transpose();
+                    D2_elem.row(i) = (cos(t) * e1 - sin(t) * e2).transpose();
+                    symmetric++;
+                } else {
+                    D1_elem.row(i) = e1.transpose();
+                    D2_elem.row(i) = e2.transpose();
+                }
+                hasDir[i] = true;
+            }
+            cout << "  " << symmetric << " / " << numElements
+                 << " vertices use the symmetric pair; the rest are principal." << endl;
+        }
+        break;
+    }
+
+    case FieldSource::Orthogonal: {
+        // Smoothest 4-RoSy: nrosy with a single anchor face (libigl tutorial
+        // 504). The anchor only fixes the global rotation.
+        cout << "Field: smoothest orthogonal cross field" << endl;
+        MatrixXd FNo;
+        igl::per_face_normals(V, F, FNo);
+        VectorXi b0(1);
+        b0 << 0;
+        MatrixXd bc0(1, 3);
+        bc0.row(0) = (V.row(F(0, 1)) - V.row(F(0, 0))).normalized();
+        MatrixXd R;
+        VectorXd S0;
+        igl::copyleft::comiso::nrosy(V, F, b0, bc0, VectorXi(), VectorXd(), MatrixXd(), 4, 0.5, R, S0);
+        defined_on_faces = true;
+        numElements = (int)F.rows();
+        D1_elem = MatrixXd::Zero(numElements, 3);
+        D2_elem = MatrixXd::Zero(numElements, 3);
+        hasDir.assign(numElements, true);
+        for (int f = 0; f < numElements; f++) {
+            const Vector3d n = FNo.row(f);
+            const Vector3d r = R.row(f);
+            D1_elem.row(f) = r.normalized().transpose();
+            D2_elem.row(f) = n.cross(r).normalized().transpose();
+        }
+        break;
+    }
     }
 
     // 3. Bring the field to a per-face frame.
     //
-    //    vertices: average over the face's three vertices (i.e. evaluate at the
-    //              barycenter) and project into the face plane. A face is only
-    //              constrained if all three of its vertices carry a direction.
+    //    vertices: average the face's vertices that carry a direction (all
+    //              three = the barycenter value) and project into the face
+    //              plane. Directions are sign-free line fields, so each vertex
+    //              is flipped to agree with the first before averaging.
     //    faces:    already per face; still projected into the face plane so the
     //              frame is tangent even if the input was not exactly so.
     int numFaces = F.rows();
@@ -968,9 +1167,21 @@ int main(int argc, char *argv[])
             d1 = D1_elem.row(fi);
             d2 = D2_elem.row(fi);
         } else {
-            if (!hasDir[v0] || !hasDir[v1] || !hasDir[v2]) continue;
-            d1 = (D1_elem.row(v0) + D1_elem.row(v1) + D1_elem.row(v2)) / 3.0;
-            d2 = (D2_elem.row(v0) + D2_elem.row(v1) + D2_elem.row(v2)) / 3.0;
+            Vector3d s1 = Vector3d::Zero(), s2 = Vector3d::Zero();
+            int k = 0;
+            for (int c = 0; c < 3; c++) {
+                const int vi = F(fi, c);
+                if (!hasDir[vi]) continue;
+                Vector3d a = D1_elem.row(vi), b2 = D2_elem.row(vi);
+                if (k > 0 && a.dot(s1) < 0) a = -a;
+                if (k > 0 && b2.dot(s2) < 0) b2 = -b2;
+                s1 += a;
+                s2 += b2;
+                k++;
+            }
+            if (k == 0) continue;
+            d1 = s1 / k;
+            d2 = s2 / k;
         }
 
         // Project onto the tangent plane
@@ -984,11 +1195,7 @@ int main(int argc, char *argv[])
 
     {
         const int constrained = (int)count(faceHasDir.begin(), faceHasDir.end(), true);
-        if (defined_on_faces)
-            cout << "Using " << constrained << " / " << numFaces << " per-face directions." << endl;
-        else
-            cout << "Interpolated to " << constrained << " / " << numFaces
-                 << " per-face directions." << endl;
+        cout << "Per-face directions: " << constrained << " / " << numFaces << " faces." << endl;
         if (constrained == 0) {
             cerr << "Error: no face received a direction." << endl;
             return 1;
@@ -1061,38 +1268,6 @@ int main(int argc, char *argv[])
             cout << "  Thinned to " << good_faces.size() << " constraint faces ("
                  << constraint_fraction * 100.0 << "% of valid, farthest-point sampled)" << endl;
         }
-    }
-
-    // Optionally discard the curvature directions and constrain the kept faces
-    // to an arbitrary 4-RoSy instead. A 4-RoSy has no distinguished axis, so any
-    // unit tangent direction is as valid a constraint as a principal one; this
-    // tests how much the curvature data actually determines the result versus
-    // the surface topology and the smoother.
-    //
-    // The reference direction is a fixed world vector projected into each face
-    // plane, so the constraints are mutually consistent (a "combed" global
-    // direction) rather than random per face.
-    if (arbitrary_field) {
-        const Vector3d worldDir = arbitrary_dir.normalized();
-        int flipped = 0;
-        for (int fi : good_faces) {
-            Vector3d n = FN.row(fi);
-            n.normalize();
-            Vector3d d = worldDir - worldDir.dot(n) * n;
-            if (d.norm() < 1e-6) {
-                // Face is perpendicular to the reference: fall back to any tangent.
-                Vector3d axis = (fabs(n.x()) < 0.9) ? Vector3d::UnitX() : Vector3d::UnitY();
-                d = n.cross(axis);
-                flipped++;
-            }
-            d.normalize();
-            bc1.row(fi) = d.transpose();
-            bc2.row(fi) = n.cross(d).normalized().transpose();
-        }
-        cout << "  Using an ARBITRARY 4-RoSy field (world dir ["
-             << worldDir.transpose() << "]) instead of principal directions";
-        if (flipped) cout << "; " << flipped << " faces fell back to a local tangent";
-        cout << endl;
     }
 
     // Create b with only good faces
@@ -1210,8 +1385,6 @@ int main(int argc, char *argv[])
     // Compute X2 as 90 degree rotation in the tangent plane
     MatrixXd X2_def = igl::rotate_vectors(X1_def, VectorXd::Constant(F.rows(), igl::PI/2), B1, B2);
 
-    // MIQ gradient size (controls quad density - higher = coarser)
-    double miq_gradient_size = 40.0;
     double miq_stiffness = 10.0;
 
     // === Diagnostic checks on cross field ===
@@ -1419,13 +1592,9 @@ int main(int argc, char *argv[])
         return true;
     };
 
-    // Output path, from the optional [output_folder] and [name] arguments.
+    // Output path: <out>/<name>_Remeshed.obj
     auto outputFilename = [&]() -> string {
-        string folder = out_folder;
-        if (!folder.empty() && folder.back() != '/') folder += '/';
-        const string base = out_name.empty() ? string("meshRemeshed")
-                                             : out_name + "_Remeshed";
-        return folder + base + ".obj";
+        return (std::filesystem::path(out_folder) / (out_name + "_Remeshed.obj")).string();
     };
 
     // Dispatch to the extractor chosen on the command line. Falls back to the
@@ -1485,16 +1654,16 @@ int main(int argc, char *argv[])
     cout << endl;
     cout << "  'R'  Preview the extracted quad mesh    'S'  Extract and SAVE it" << endl;
     cout << "  'F'  Per-face interpolated bc1/bc2" << endl;
-    cout << "  '+' / '-'  Coarser / finer quads (re-runs MIQ)" << endl;
+    cout << "  '+' / '-'  Denser / coarser quads: gradient size x1.5 / /1.5 (re-runs MIQ)" << endl;
     cout << "  '0'  Toggle the seam + singularity overlay on views 3-7" << endl;
     cout << endl;
     cout << "  Red = first direction (D1/FF1/X1), blue = second (D2/FF2/X2)." << endl;
     cout << "  Magenta lines = seams; green/purple dots = +1/4 and -1/4 singularities." << endl;
-    cout << "  Add 'batch' on the command line to skip the viewer and just write the mesh." << endl;
+    cout << "  Add --batch on the command line to skip the viewer and just write the mesh." << endl;
 
     // Re-run MIQ at a new gradient size ('+' / '-'), keeping the same method.
     auto recomputeMIQ = [&](double new_gradient_size) {
-        cout << "Recomputing MIQ with gradient_size=" << new_gradient_size
+        cout << "Recomputing MIQ with gradient size " << new_gradient_size
              << ", method=" << (use_direct_round ? "direct" : "integration") << "..." << endl;
 
         igl::copyleft::comiso::miq(
@@ -1820,6 +1989,11 @@ int main(int argc, char *argv[])
     };
 
     viewer.callback_key_pressed = handleKey;
+
+    // Start on the original mesh with the frame field and the integration
+    // lines (the UV grid texture) shown together.
+    show_cross_field = true;
+    handleKey(viewer, '1', 0);
 
     viewer.launch();
     return 0;

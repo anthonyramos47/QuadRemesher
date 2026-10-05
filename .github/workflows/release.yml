@@ -52,9 +52,12 @@ jobs:
           B="QuadRemesher-${{ matrix.name }}/bin"
           mkdir -p smoke
           "$B/principalDirections" test_meshes/lilium.obj smoke/
-          "$B/quadRemesher" test_meshes/lilium.obj smoke/D1.dmat smoke/D2.dmat \
-              --out smoke --name lilium qex batch constraints=0.1
-          test -s smoke/lilium_Remeshed.obj
+          "$B/quadRemesher" test_meshes/lilium.obj --d1 smoke/D1.dmat --d2 smoke/D2.dmat \
+              --format dmat --constraints 0.1 --batch --out smoke --name data
+          "$B/quadRemesher" test_meshes/lilium.obj --field conjugate --angle 30 \
+              --constraints 0.1 --batch --out smoke --name conjugate
+          test -s smoke/data_Remeshed.obj
+          test -s smoke/conjugate_Remeshed.obj
 
       - name: Zip
         working-directory: .
