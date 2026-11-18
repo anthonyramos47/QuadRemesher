@@ -132,7 +132,9 @@ if(USE_LIBQEX)
     if(MSVC)
         target_compile_options(qex PRIVATE /w)
         # OpenMesh's headers refuse to compile on MSVC without M_PI etc.
-        target_compile_definitions(qex PUBLIC _USE_MATH_DEFINES NOMINMAX)
+        # qex.h marks its functions __declspec(dllimport) unless DLLEXPORT is
+        # already defined; qex is a static library, so define it empty.
+        target_compile_definitions(qex PUBLIC _USE_MATH_DEFINES NOMINMAX DLLEXPORT=)
     else()
         target_compile_options(qex PRIVATE -w)
     endif()
