@@ -58,6 +58,30 @@ endif()
 
 FetchContent_MakeAvailable(libigl)
 
+# CoMISo's GMM_Tools.cc defines GMM_USES_LAPACK, which routes gmm's dot and
+# axpy through BLAS. gmm declares ddot_ as a variadic function, and on Apple
+# Silicon variadic arguments go on the stack while BLAS reads registers, so
+# the solver segfaults inside DDOT. (Windows crashes in the same place; its
+# bundled OpenBLAS is an int64 build while gmm passes 32-bit ints.) Drop the
+# define so gmm uses its own C++ kernels everywhere; ddot/daxpy were the only
+# BLAS calls.
+# libigl also copies CoMISo's sources into its build tree as headers, and
+# MISolver.cc includes GMM_Tools.cc from that copy, so patch both.
+FetchContent_GetProperties(comiso)
+FetchContent_GetProperties(libigl)
+foreach(_gmm_tools
+        "${comiso_SOURCE_DIR}/Solver/GMM_Tools.cc"
+        "${libigl_BINARY_DIR}/CoMISo/include/CoMISo/Solver/GMM_Tools.cc")
+    if(EXISTS "${_gmm_tools}")
+        file(READ "${_gmm_tools}" _src)
+        string(REPLACE "#define GMM_USES_LAPACK\n" "// #define GMM_USES_LAPACK (disabled by QuadRemesher)\n" _patched "${_src}")
+        if(NOT _patched STREQUAL _src)
+            file(WRITE "${_gmm_tools}" "${_patched}")
+            message(STATUS "Patched ${_gmm_tools}: GMM_USES_LAPACK disabled")
+        endif()
+    endif()
+endforeach()
+
 # CoMISo's bundled GMM uses deprecated 'register' keyword (removed in C++17)
 # and deprecated sprintf. Suppress these as errors.
 if(TARGET CoMISo AND NOT MSVC)
