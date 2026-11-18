@@ -131,6 +131,8 @@ if(USE_LIBQEX)
     # Upstream 2013 code, compiled against a far newer OpenMesh: quiet its warnings.
     if(MSVC)
         target_compile_options(qex PRIVATE /w)
+        # OpenMesh's headers refuse to compile on MSVC without M_PI etc.
+        target_compile_definitions(qex PUBLIC _USE_MATH_DEFINES NOMINMAX)
     else()
         target_compile_options(qex PRIVATE -w)
     endif()
